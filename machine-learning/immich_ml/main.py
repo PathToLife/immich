@@ -10,6 +10,8 @@ from functools import partial
 from typing import Any, AsyncGenerator, Callable, Iterator
 from zipfile import BadZipFile
 
+import numpy as np
+
 import orjson
 from fastapi import Depends, FastAPI, File, Form, HTTPException
 from fastapi.responses import ORJSONResponse, PlainTextResponse
@@ -149,6 +151,27 @@ def get_entries(entries: str = Form()) -> InferenceEntries:
         raise HTTPException(422, "Invalid request format.")
 
 
+def get_embeddings(embeddings: str = Form()) -> np.ndarray:
+    try:
+        data: Any = orjson.loads(embeddings)
+
+        # Validate that data is a list or array-like structure
+        if not isinstance(data, (list, tuple)) and not hasattr(data, "__iter__"):
+            raise ValidationError("Embeddings must be an array[array[float | int]] of numbers")
+
+        if not all(isinstance(l, (list, tuple)) for l in data):
+            raise ValueError("Embeddings must be an array[array[float | int]] of numbers")
+
+        # Validate that all elements are numeric
+        if not all(all(isinstance(x, (int, float)) for x in l) for l in data):
+            raise ValueError("Embeddings must be an array[array[float | int]] of numbers")
+
+        return np.array(data, dtype=float)
+    except (orjson.JSONDecodeError, ValueError, KeyError, AttributeError) as e:
+        log.error(f"Invalid request format: {e}")
+        raise HTTPException(422, "Invalid request format.")
+
+
 app = FastAPI(lifespan=lifespan)
 
 
@@ -164,6 +187,7 @@ def ping() -> PlainTextResponse:
 
 @app.post("/predict", dependencies=[Depends(update_state)])
 async def predict(
+    # another holy mother input shape mutation
     entries: InferenceEntries = Depends(get_entries),
     image: bytes | None = File(default=None),
     text: str | None = Form(default=None),
@@ -174,8 +198,19 @@ async def predict(
         inputs = text
     else:
         raise HTTPException(400, "Either image or text must be provided")
+    # holy mother of dependecy chain merge model hello I'm dumb
     response = await run_inference(inputs, entries)
     return ORJSONResponse(response)
+
+
+# for smart search for similar(group of images + text) <-> postgres vector db
+@app.post("/embedding_average")
+async def embedding_average(embeddings=Depends(get_embeddings)) -> ORJSONResponse:
+    try:
+        return ORJSONResponse(np.mean(embeddings, axis=0).tolist())
+    except Exception as e:
+        log.error(f"Error calculating embedding average: {e}")
+        raise HTTPException(500, f"Error calculating embedding average: {str(e)}")
 
 
 async def run_inference(payload: Image | str, entries: InferenceEntries) -> InferenceResponse:

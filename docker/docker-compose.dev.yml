@@ -111,6 +111,7 @@ services:
     depends_on:
       - database
     restart: unless-stopped
+    command: ["python", "-m", "immich_ml"]
     healthcheck:
       disable: false
 

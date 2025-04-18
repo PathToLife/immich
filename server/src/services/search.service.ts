@@ -21,6 +21,13 @@ import { BaseService } from 'src/services/base.service';
 import { getMyPartnerIds } from 'src/utils/asset.util';
 import { isSmartSearchEnabled } from 'src/utils/misc';
 
+
+// @todo remove, for POC only
+type SmartSearchQuery = {
+  similarToAssetIds: string[];
+  searchText: string;
+};
+
 @Injectable()
 export class SearchService extends BaseService {
   async searchPerson(auth: AuthDto, dto: SearchPeopleDto): Promise<PersonResponseDto[]> {
@@ -71,6 +78,46 @@ export class SearchService extends BaseService {
     return items.map((item) => mapAsset(item, { auth }));
   }
 
+  /**
+   * Parses a user input into individual search components
+   * @param smartSearchQuery The Query
+   *
+   * Example
+   * smartSearchQuery: green st patricks day, green clothing similarTo:<uuid1> similarTo:<uuid2>
+   * will return
+   * {
+   *  assetIds: [<uuid1>, <uuid2>],
+   *  searchTerm: green st patricks day, green clothing
+   * }
+   */
+  private parseQuery(smartSearchQuery: string): SmartSearchQuery {
+    const similarToAssetIds: string[] = [];
+    let searchText = smartSearchQuery;
+
+    // Match all similarTo:<uuid> patterns
+    const similarToRegex = /similarTo:([^\s]+)/gi;
+    let match: RegExpExecArray | null;
+
+    // Extract all asset IDs
+    while ((match = similarToRegex.exec(smartSearchQuery)) !== null) {
+      similarToAssetIds.push(match[1]);
+      // Remove the matched pattern from the search text
+      searchText = searchText.replace(match[0], '');
+    }
+
+    // Trim any extra whitespace and commas
+    searchText = searchText
+      .replace(/,\s*$/, '')
+      .replace(/\s*,$/, '')
+      .replaceAll(/\s{2,}/g, ' ') // multiple spaces -> 1 space
+      .trim();
+
+    return {
+      similarToAssetIds,
+      searchText,
+    };
+  }
+
   async searchSmart(auth: AuthDto, dto: SmartSearchDto): Promise<SearchResponseDto> {
     const { machineLearning } = await this.getConfig({ withCache: false });
     if (!isSmartSearchEnabled(machineLearning)) {
@@ -88,6 +135,52 @@ export class SearchService extends BaseService {
       { page, size },
       { ...dto, userIds, embedding },
     );
+
+    let items: AssetEntity[] = [];
+    let hasNextPage = false;
+
+    const searchBreakdown = this.parseQuery(dto.query);
+    const searchEmbeddings: string[] = [];
+
+    if (!searchBreakdown.searchText && !searchBreakdown.similarToAssetIds) {
+      throw new BadRequestException('Search term is not understood');
+    }
+
+    if (searchBreakdown.similarToAssetIds) {
+      (await this.searchRepository.getAssetEmbeddings(searchBreakdown.similarToAssetIds)).forEach((emb) =>
+        searchEmbeddings.push(emb),
+      );
+    }
+
+    if (searchBreakdown.searchText) {
+      const textEmbedding = await this.machineLearningRepository.encodeText(
+        machineLearning.urls,
+        searchBreakdown.searchText,
+        {
+          modelName: machineLearning.clip.modelName,
+          language: dto.language,
+        },
+      );
+      searchEmbeddings.push(textEmbedding);
+    }
+
+    this.logger.log(
+      `searchSmart; searchBreakdown=${JSON.stringify(searchBreakdown, null, 2)}; embeddings.length=${searchEmbeddings.length}`,
+    );
+
+    if (searchEmbeddings.length > 1) {
+      const embedding = await this.machineLearningRepository.averageEmbeddings(machineLearning.urls, searchEmbeddings);
+      const res = await this.searchRepository.searchSmart({ page, size }, { ...dto, userIds, embedding });
+      items = res.items;
+      hasNextPage = res.hasNextPage;
+    } else {
+      const res = await this.searchRepository.searchSmart(
+        { page, size },
+        { ...dto, userIds, embedding: searchEmbeddings[0] },
+      );
+      items = res.items;
+      hasNextPage = res.hasNextPage;
+    }
 
     return this.mapResponse(items, hasNextPage ? (page + 1).toString() : null, { auth });
   }

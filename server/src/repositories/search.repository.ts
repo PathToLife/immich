@@ -256,6 +256,18 @@ export class SearchRepository {
   }
 
   @GenerateSql({
+    params: [[DummyValue.UUID]],
+  })
+  async getAssetEmbeddings(assetIds: string[]): Promise<string[]> {
+    const res = await this.db
+      .selectFrom('smart_search')
+      .where('assetId', '=', anyUuid(assetIds))
+      .select('embedding')
+      .execute();
+    return res.map((row) => row.embedding);
+  }
+
+  @GenerateSql({
     params: [
       { page: 1, size: 200 },
       {
